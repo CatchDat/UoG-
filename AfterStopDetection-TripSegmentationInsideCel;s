@@ -1,0 +1,268 @@
+import json
+import os.path
+from datetime import datetime
+import psycopg2
+import sys
+import pandas as pd
+import numpy as np
+import geopy
+from geopy.distance import great_circle
+
+try:
+
+    conn_string ="XXX"
+
+    con = psycopg2.connect(conn_string)
+    con.autocommit = True
+
+    cur = con.cursor()
+    cur.execute('SELECT version()')
+    ver = cur.fetchone()
+    print ver
+    cur.close()
+
+    allGPSTalbe='journey_newagent_yang4'
+    sel_allDates='SELECT to_char(ts, \'YYYYMMDD\') AS formatted_ts from(' \
+                                                'SELECT generate_series(min(ts_d), max(ts_d), interval \'1 day\') AS ts from %s) foo' %allGPSTalbe
+    cur = con.cursor()
+    cur.execute(sel_allDates)
+    rows = cur.fetchall()
+    drange = []
+    for row in rows:
+        drange.append(row[0])
+    print len(drange)
+    cur.close()
+
+
+    for drange1 in drange:
+        print drange1
+
+        from sqlalchemy import create_engine
+
+        engine = create_engine('postgresql://postgres:123456@localhost:5432/yangnewsample_Grid')
+        sql_query = 'select id,ts_d,dur_lag,longitude,latitude from journey_newagent_yang4 where to_char(ts_d, \'YYYYMMDD\')=\'%s\'' % drange1
+        print sql_query
+        df = pd.read_sql_query(sql_query, con=engine)
+        print df
+        df['stop'] = pd.Series([0] * len(df.index), index=df.index)
+        print df
+
+        df['DetectedObjectId']=pd.Series([0] * len(df.index), index=df.index)
+
+        df=df.set_index('id')
+        print df
+
+        #if drange1=='20160718': #or drange1=='20160719':
+
+        outfile = 'E:\\XXXh\\stopTimes_' + str(drange1).replace('/', '') + '.txt'
+        print outfile
+        if os.path.exists(outfile):
+            with open(outfile) as data_file:
+                data = json.load(data_file)
+
+                print data
+                data_file.close()
+
+                stopSegTimes={}
+                for stop, gps in data.iteritems():
+                    print stop
+                    print gps
+                    gpsCast={int(k):datetime.strptime(str(v),'%Y-%m-%d %H:%M:%S') for k,v in gps.iteritems()}
+
+
+                    # for gid, ts in gps.iteritems():
+                    #     print gid
+                    #     print ts
+
+                    gpsDF=pd.DataFrame.from_dict(gpsCast, orient='index')
+                    #print gpsDF.sort()
+                    gpsDF.columns=['ts']
+                    gpsDF=gpsDF.sort_index()
+                    print gpsDF
+
+
+                    i=0
+                    for index, row in gpsDF.iterrows():
+                        #print index
+                        # if i==0:
+                        #     minStopId=index
+                        toUpdateId=index
+                        df.set_value(toUpdateId, 'DetectedObjectId', int(stop))
+                        i+=1
+                        # maxStopID=index
+
+        markStopIndex=0
+        markStopId=0
+        sel=[]
+        for index, row in df.iterrows():
+            if row['DetectedObjectId']!=0:
+                if markStopId==0:
+                    print index
+                    markStopId=row['DetectedObjectId']
+                    markstopIndex=index
+                if row['DetectedObjectId']!=markStopId:
+                    print index
+                    startOfNewIndex=index
+                    startOfNewId=row['DetectedObjectId']
+
+                    print df.loc[(df['DetectedObjectId']==markStopId) & (df.index<startOfNewIndex)]
+                    print (df.loc[(df['DetectedObjectId']==markStopId) & (df.index<startOfNewIndex)]).iloc[-1].name
+
+                    endOfOldIndex=(df.loc[(df['DetectedObjectId']==markStopId) & (df.index<startOfNewIndex)]).iloc[-1].name
+                    startOfOldIndex=markstopIndex
+
+                    sel.append((startOfOldIndex,endOfOldIndex,markStopId))
+
+                    markStopId = startOfNewId
+                    markstopIndex=startOfNewIndex
+
+                if index==df.iloc[-1].name:
+                    endOfOldIndex=index
+                    startOfOldIndex = markstopIndex
+                    sel.append((startOfOldIndex, endOfOldIndex,markStopId))
+
+        print sel
+
+        ##clearn bypass stops
+        ##for a cell visit, taken its circular round trip as longest distance to travel, >2min visit are probably better infer an activity, <2min visit are taking as bypass
+        ##locate stops at a given cell, dwelling time is under 2min=120seconds, remove the stop from sel list
+        ##result in oStop=dStop and the trip inbetween are travel which turns to be  retrun journeys
+        ##will be in the same pattern as recreation journey where oStop=dStop
+        ##threshold=(cellSize*pi*srt(2)/1000)3km/hr
+
+        dfLastID=df.iloc[-1].name
+        sel2=[]
+        for v in sel:
+            #print v
+            stopStartTime= df['ts_d'][v[0]]
+            if v[1]+1<=dfLastID:
+                stopEndTime=  df['ts_d'][v[1]+1]
+            else:
+                stopEndTime=df['ts_d'][v[1]]
+            stopDuration=(stopEndTime-stopStartTime).seconds
+            if stopDuration>120:
+                sel2.append(v)
+
+        print len(sel)
+        print sel
+        print len(sel2)
+        print sel2
+
+        ###round trip
+        #assume a round trip is a)duration more than 5min b) spatially departed from the ostop cell and dstop cell
+        df['2ndstop'] = pd.Series([0] * len(df.index), index=df.index)
+        print df.shape
+        print df.columns
+        for v in sel2:
+            #print v[0], v[1],v[2]
+            for i in range(v[0],v[1]+1):
+                df.set_value(i, '2ndstop', int(v[2]))
+        #
+        # with pd.option_context('display.max_rows', None, 'display.max_columns', 3):
+        #     print df
+
+        #print df[0:5]
+        df['3rdstop'] = df['2ndstop']
+        for v in sel2:
+            startID=v[0]
+            endID=v[1]
+
+            stopdf=df.loc[startID:endID]
+            print stopdf
+            moveStartId=0
+            moveEndID=0
+            startFlag=0
+            endFlag=0
+            for index, row in stopdf.iterrows():
+                #print row['DetectedObjectId']
+                if row['DetectedObjectId']==0:
+                    if moveStartId==0:
+                        moveStartId=index
+                        startFlag=1
+                if row['DetectedObjectId']==1 and moveStartId!=0:
+                    moveEndID=index-1
+                    endFlag=1
+                if startFlag==1 and endFlag==1:
+                    print moveStartId,moveEndID
+                    moveStartTime = stopdf['ts_d'][moveStartId]
+                    moveEndTime = stopdf['ts_d'][moveEndID+1]
+                    moveDuration = (moveEndTime - moveStartTime).seconds
+
+
+                    def checkCentriodDistToPreviousStop(indf, moveSid,moveEid):
+                        ##distance to teh previous records
+                        previousid=moveSid-1
+                        #print (df['latitude'][previousid], df['longitude'][previousid])
+                        previousP=(df['latitude'][previousid], df['longitude'][previousid])
+                        afterid=moveEid+1
+                        #print (df['latitude'][afterid], df['longitude'][afterid])
+                        afterP=(df['latitude'][afterid], df['longitude'][afterid])
+                        toPreviousDists=[]
+                        toAfterDist=[]
+                        for i in range(moveStartId,moveEndID+1):
+                            #print i
+                            #print (df['latitude'][moveSid],df['longitude'][moveSid])
+                            currentP=(df['latitude'][i],df['longitude'][i])
+                            #print great_circle(previousP,currentP).meters
+                            #print great_circle(currentP, afterP).meters
+                            toPreviousDists.append(great_circle(previousP,currentP).meters)
+                            toAfterDist.append(great_circle(currentP, afterP).meters)
+                        #print toPreviousDists
+                        #print  toAfterDist
+                        return(max(toPreviousDists), max(toPreviousDists))
+
+                    distsCheck=checkCentriodDistToPreviousStop(df,moveStartId,moveEndID)
+                    if moveDuration>=300 and distsCheck[0]>=2*60 and distsCheck[1]>=2*60:
+                        for i in range(moveStartId,moveEndID+1):
+                            df.set_value(i,'3rdstop',0)
+                    startFlag=0
+                    endFlag=0
+                    moveStartId=0
+
+        ##it is necessary to clean bypassed stops after dealing with round trips
+        print df
+        stopStartId=0
+        stopEndID=0
+        startFlag=0
+        endFlag=0
+        for index, row in df.iterrows():
+            print row['3rdstop']
+            if row['3rdstop'] == 1:
+                if stopStartId == 0:
+                    stopStartId = index
+                    startFlag = 1
+            if row['3rdstop'] == 0 and stopStartId != 0:
+                stopEndID = index - 1
+                endFlag = 1
+            if startFlag == 1 and endFlag == 1:
+                print stopStartId, stopEndID
+                stopStartTime = df['ts_d'][stopStartId]
+                stopEndTime = df['ts_d'][stopEndID + 1]
+                stopDuration = (stopEndTime - stopStartTime).seconds
+                if stopDuration <= 120:
+                    for i in range(stopStartId, stopEndID + 1):
+                        df.set_value(i, '3rdstop', 0)
+                startFlag = 0
+                endFlag = 0
+                stopStartId = 0
+
+
+        # import json
+
+        outfile = 'E:\\stopDenotions_' + str(
+            drange1).replace('/',
+                             '') + '.txt'
+        df['3rdstop'].to_csv(outfile)
+
+
+
+except psycopg2.DatabaseError, e:
+    print 'Error %s' % e
+    sys.exit(1)
+
+
+finally:
+
+    if con:
+        con.close()
+
