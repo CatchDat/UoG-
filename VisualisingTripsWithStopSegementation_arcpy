@@ -1,0 +1,46 @@
+
+import arcpy
+from arcpy.sa import *
+
+import datetime
+
+# Set workspace and extent environments
+arcpy.env.workspace = "E:\\XXX.gdb"
+
+input_JourneyFeat = 'journey_newagent_yang4_stps13'
+toProcessFeat = input_JourneyFeat
+##find unique dates
+cursor = arcpy.SearchCursor(input_JourneyFeat)
+row = cursor.next()
+sample_dates=[]
+while row:
+    #print(row.getValue('TS_D_Converted'))
+    sample_dates.append(row.getValue('TS_D_Converted'))
+    row = cursor.next()
+del cursor
+del row
+print len(sample_dates)
+print min(sample_dates)
+print max(sample_dates)
+
+def daterange(d1, d2):
+    return (d1 + datetime.timedelta(days=i) for i in range((d2 - d1).days + 2))
+
+arcpy.MakeFeatureLayer_management(input_JourneyFeat, toProcessFeat + "lyr")
+for d in daterange(min(sample_dates), max(sample_dates)):
+    print d
+    drange1=d.strftime('%Y/%m/%d')
+    drange2=(d+datetime.timedelta(days=1)).strftime('%Y/%m/%d')
+    print drange1
+    print drange2
+
+    expression = ' "TS_D_Converted" > date \'%s\' and "TS_D_Converted" <= date \'%s\' ' %(drange1,drange2)
+    print expression
+    arcpy.SelectLayerByAttribute_management(toProcessFeat + "lyr", "NEW_SELECTION", expression)
+    result = arcpy.GetCount_management(toProcessFeat + "lyr")
+    count = int(result.getOutput(0))
+    print(count)
+
+    outGPS='gps_6_'+str(drange1).replace('/','')
+    arcpy.CopyFeatures_management(toProcessFeat + "lyr", outGPS)
+
