@@ -1,0 +1,60 @@
+
+import arcpy
+from arcpy.sa import *
+import numpy as np
+
+import datetime
+
+# Set workspace and extent environments
+tiledRasterFolder = "E:\\XXXUKTiles\\"
+
+#outputRasterDB = 'E:\\XXX.gdb'
+arcpy.env.workspace = tiledRasterFolder
+arcpy.env.scratchWorkspace=tiledRasterFolder
+maxValue=0
+for i in range(0,23558+1):
+# for k in range(0,14+1):
+#     for l in range(0,3):
+
+        rasterName=tiledRasterFolder+'YangNew_UKTiles_%s.TIF'%str(i)
+        if arcpy.Exists(rasterName):
+            myRaster= arcpy.Raster(rasterName)
+
+
+            mx = myRaster.extent.XMin
+            my = myRaster.extent.YMin
+            lowerLeft = arcpy.Point(myRaster.extent.XMin,myRaster.extent.YMin)
+            wcellSize = myRaster.meanCellWidth
+            hcellSize = myRaster.meanCellWidth
+
+            # Extract data block
+            myData = arcpy.RasterToNumPyArray(myRaster,nodata_to_value=255)
+            print myData.shape
+
+            outputData=np.zeros(shape=myData.shape)
+            numRows=myData.shape[0]
+            numColumns=myData.shape[1]
+            # j=((numRows*numColumns)-1)+i*((numRows*numColumns)-1)+i
+            # for x in (range(0,numRows)):
+            #     for y in (range(0,numColumns)):
+            #         outputData[x,y]=j
+            #         j-=1
+            j=maxValue+1
+            for x in (range(0,numRows)):
+                for y in (range(0,numColumns)):
+                    outputData[x,y]=j
+                    j+=1
+            maxValue= np.amax(outputData)
+
+
+            #print outputData.astype(int)
+            #flipptedOuputData=np.fliplr(outputData)
+
+            myRasterBlock = arcpy.NumPyArrayToRaster(outputData.astype(int), arcpy.Point(mx, my),
+                                                     myRaster.meanCellWidth,
+                                                     myRaster.meanCellHeight)
+
+            filetemp ='tr_'+str(i)+'.TIF'
+            myRasterBlock.save(filetemp)
+        else:
+            print 'check: '+str(i)
