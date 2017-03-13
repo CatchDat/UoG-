@@ -1,0 +1,224 @@
+import json
+import os.path
+from datetime import datetime
+import psycopg2
+import sys
+import pandas as pd
+import numpy as np
+import geopy
+from geopy.distance import great_circle
+
+
+try:
+
+    conn_string = "XXX"
+
+    con = psycopg2.connect(conn_string)
+    con.autocommit = True
+
+    cur = con.cursor()
+    cur.execute('SELECT version()')
+    ver = cur.fetchone()
+    print ver
+    cur.close()
+
+    cur = con.cursor()
+    stopTable='yangnew_stops'
+    createTable_sql='CREATE TABLE %s (id serial, starttripid integer, endtripid integer, rasterid bigint, inrastertime timestamp, outtime timestamp, rasterduration double precision);'%stopTable
+    cur.execute(createTable_sql)
+
+    moveTable='yangnew_moves'
+    createTable_sql='CREATE TABLE %s ( id serial, tripid integer, rasterid bigint, inrastertime timestamp, outtime timestamp, rasterduration double precision);'%moveTable
+    cur.execute(createTable_sql)
+    cur.close()
+
+    from sqlalchemy import create_engine
+
+    engine = create_engine('XXX')
+    sql_query = 'select gid,ts_d::timestamp,dur_lag,stp::integer,rastervalu from journey_newagent_yang4_stps13_withrastervalues_all where stp<>\'9999\'  order by gid' #'and  date(ts_d_conve::timestamp)=\'2016-07-14\'::'
+    print sql_query
+    df = pd.read_sql_query(sql_query, con=engine)
+    #print df
+    #print df.dtypes
+
+
+    movesdf=df.loc[(df['stp']==0)]
+    print movesdf
+    movesdf['shiftid']=movesdf.gid.shift(-1)
+    #print movesdf
+    movesdf['shifdiff']=movesdf['shiftid']-movesdf['gid']
+    movesdf = movesdf.set_index(['gid'])
+
+    with pd.option_context('display.max_rows', None, 'display.max_columns', 3):
+        print movesdf
+    print movesdf
+
+
+    df=df.set_index(['gid'])
+    df.sort_index()
+    print df
+
+    startMoveId=movesdf.iloc[0].name
+    endMoveId=0
+    startTripId=0
+    endTripdId=0
+    markMove=0
+    tripId=0
+    endStopList=[]
+    startStopList=[]
+    moves=[]
+    for index, row in movesdf.iterrows():
+
+        if row['shifdiff']>1 or index==movesdf.index[-1]:
+            endMoveId=index
+            Movedf=movesdf[(movesdf['stp']==0) & (movesdf.index<=endMoveId) & (movesdf.index>=startMoveId)]
+            print Movedf
+
+            #previousStop
+            ####cursorId=startMoveId-1
+            cursorId=Movedf.index[0]-1
+            cnt=0
+            while cursorId>=df.iloc[0].name and cursorId in df.index:
+                print df.loc[[cursorId]]['stp']
+                #print df.index[cursorId]['stp']
+                if cnt==0:
+                    stopName=int(df.loc[[cursorId]]['stp'])
+                    print int(df.loc[[cursorId]]['stp'])
+                if int(df.loc[[cursorId]]['stp'])>0 and int(df.loc[[cursorId]]['stp'])==stopName:
+
+                    cursorId-=1
+                else:
+                    break
+                cnt+=1
+            print cursorId
+            previousStopStartID=cursorId+1
+            previousStopEndID=Movedf.index[0]-1
+            previousStopIDs=(previousStopStartID,previousStopEndID)
+            startStopList.append(previousStopIDs)
+
+            def findRasterSegments(startID, endID):
+                previousStopdf=df.loc[startID:endID]
+                #print previousStopdf
+                previousStopdf['shiftRaster'] = previousStopdf.rastervalu.shift(-1)
+                # print movesdf
+                previousStopdf['shifRaster'] = previousStopdf['rastervalu'] - previousStopdf['shiftRaster']
+                print previousStopdf
+                markRasterId = previousStopdf.rastervalu.iloc[0]
+                markix=previousStopdf.index[0]
+                rs=[]
+                for ix, r in previousStopdf.iterrows():
+                    if r['shifRaster']!=0 or np.isnan(r['shifRaster']):
+                        sel_previousStopdf = previousStopdf.loc[markix:ix]
+                        #print sel_previousStopdf
+                        enterRasterTime = sel_previousStopdf['ts_d'].min(axis=0)
+                        leaveRasterTime=sel_previousStopdf['ts_d'].max(axis=0)
+                        rasterDuation=sel_previousStopdf['dur_lag'].sum(axis=0)
+                        print (r['rastervalu'],enterRasterTime,leaveRasterTime,rasterDuation)
+                        markix=ix+1
+                        rs.append((r['rastervalu'],enterRasterTime,leaveRasterTime,rasterDuation))
+                return (rs)
+
+            print findRasterSegments(previousStopStartID,previousStopEndID)
+            priviousRasterSegments=findRasterSegments(previousStopStartID,previousStopEndID)
+
+            if previousStopIDs not in endStopList:
+                cur = con.cursor()
+                for seg in priviousRasterSegments:
+                    print seg
+                    print tripId
+                    insert_sql = 'insert into %s ( starttripid,rasterid,inrastertime,outtime,rasterduration) values (%s,%s,\'%s\',\'%s\',%s)' % (stopTable,tripId, seg[0], seg[1], seg[2], seg[3])
+                    print insert_sql
+                    cur.execute(insert_sql)
+                cur.close()
+            else:
+                cur = con.cursor()
+                for seg in priviousRasterSegments:
+                    print seg
+                    print tripId
+                    #createTable_sql = 'CREATE TABLE yangnew_stops (id serial, starttripid integer, tripstart boolean, endtripid integer, tripend boolean, rasterid bigint, inrastertime timestamp, outtime timestamp, rasterduration double precision);'
+
+                    update_sql = 'update %s set starttripid=%s where rasterid=%s and inrastertime=\'%s\' and outtime=\'%s\' and rasterduration=%s'%(stopTable,tripId, seg[0],seg[1],seg[2],seg[3])
+                    print update_sql
+                    cur.execute(update_sql)
+                cur.close()
+
+
+            ##afterStop
+            cursorId=endMoveId+1
+            cnt=0
+            while cursorId<=df.iloc[-1].name and cursorId in df.index:
+                print df.loc[[cursorId]]['stp']
+                #print df.index[cursorId]['stp']
+                if cnt==0:
+                    stopName=int(df.loc[[cursorId]]['stp'])
+                if int(df.loc[[cursorId]]['stp'])>0 and int(df.loc[[cursorId]]['stp'])==stopName:
+                    cursorId+=1
+                else:
+                    break
+                cnt += 1
+            print cursorId
+            afterStopStartID=endMoveId+1
+            afterStopEndID=cursorId-1
+            afterStopIDs=(afterStopStartID,afterStopEndID)
+            endStopList.append(afterStopIDs)
+            print findRasterSegments(afterStopStartID, afterStopEndID)
+            afterRasterSegments=findRasterSegments(afterStopStartID, afterStopEndID)
+            afterStopName=stopName
+
+            if afterStopIDs not in startStopList:
+                cur = con.cursor()
+                for seg in afterRasterSegments:
+                    print seg
+                    print tripId
+                    insert_sql = 'insert into %s ( endtripid,rasterid,inrastertime,outtime,rasterduration) values (%s,%s,\'%s\',\'%s\',%s)' % (stopTable,tripId, seg[0], seg[1], seg[2], seg[3])
+                    print insert_sql
+                    cur.execute(insert_sql)
+                cur.close()
+            else:
+                cur = con.cursor()
+                for seg in afterRasterSegments:
+                    print seg
+                    print tripId
+                    #createTable_sql = 'CREATE TABLE yangnew_stops (id serial, starttripid integer, tripstart boolean, endtripid integer, tripend boolean, rasterid bigint, inrastertime timestamp, outtime timestamp, rasterduration double precision);'
+
+                    update_sql = 'update %s set endtripid=%s where rasterid=%s and inrastertime=\'%s\' and outtime=\'%s\' and rasterduration=%s'%(stopTable,tripId, seg[0],seg[1],seg[2],seg[3])
+                    print update_sql
+                    cur.execute(update_sql)
+                cur.close()
+
+
+            moveIds=(startMoveId,endMoveId)
+            print findRasterSegments(startMoveId, endMoveId)
+            findMoveIds=findRasterSegments(startMoveId, endMoveId)
+            if moveIds not in moves:
+                cur = con.cursor()
+                for seg in findMoveIds:
+                    print seg
+                    print tripId
+                    insert_sql = 'insert into %s (tripid,rasterid,inrastertime,outtime,rasterduration) values (%s,%s,\'%s\',\'%s\',%s)' % (moveTable,tripId, seg[0], seg[1], seg[2],seg[3])
+                    print insert_sql
+                    cur.execute(insert_sql)
+                cur.close()
+                moves.append(moveIds)
+
+            startMoveId=afterStopEndID+1
+
+            tripId+=1
+
+
+except psycopg2.DatabaseError, e:
+    print 'Error %s' % e
+    sys.exit(1)
+
+
+finally:
+
+    if con:
+        con.close()
+
+
+
+
+
+
+
