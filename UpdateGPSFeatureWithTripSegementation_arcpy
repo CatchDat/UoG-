@@ -1,0 +1,59 @@
+import numpy as np
+
+import arcpy
+from arcpy.sa import *
+
+import datetime
+#import pandas as pd
+
+import os
+import glob
+import json
+
+contents = {}
+json_dir_name = "E:\\XXX"
+
+json_pattern = os.path.join(json_dir_name,"*.txt" )
+file_list = glob.glob(json_pattern)
+
+for file in file_list:
+    print file
+    x = np.genfromtxt(file, delimiter=',')
+    for inx in x:
+        #print inx[0],inx[1]
+        contents[inx[0]]=inx[1]
+print len(contents)
+
+
+
+sizeFolder='YangNew'
+
+stopFolder='EXXX.gdb'
+arcpy.env.workspace=stopFolder
+
+input_JourneyFeat = 'journey_newagent_yang4'
+toProcessFeat = input_JourneyFeat
+arcpy.CopyFeatures_management(toProcessFeat,input_JourneyFeat[0:]+'_stps13')
+
+toProcessFeat=input_JourneyFeat[0:]+'_stps13'
+
+arcpy.AddField_management(toProcessFeat, 'stp', "TEXT")
+
+arcpy.CalculateField_management(toProcessFeat, 'stp',"9999")
+
+fields = ['OBJECTID','stp']
+
+with arcpy.da.UpdateCursor(toProcessFeat, fields) as cursor:
+    for row in cursor:
+        if row[0] in contents.keys():
+            row[1] = contents[row[0]]
+            cursor.updateRow(row)
+cursor=None
+row=None
+
+
+
+
+
+
+
