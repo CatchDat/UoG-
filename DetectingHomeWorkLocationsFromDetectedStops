@@ -1,0 +1,283 @@
+import json
+import os.path
+from datetime import datetime
+import psycopg2
+import sys
+import pandas as pd
+import numpy as np
+import geopy
+from geopy.distance import great_circle
+
+
+try:
+
+    conn_string = "XXX"
+
+    con = psycopg2.connect(conn_string)
+    con.autocommit = True
+
+    cur = con.cursor()
+    cur.execute('SELECT version()')
+    ver = cur.fetchone()
+    print ver
+    cur.close()
+
+
+
+    stopTable='yangnew_stops_newt'
+    #C1: home=last record of a day, dwelling time and over a day assuming users sleeps at home and day over night
+    #shortcome: users lost signal at certain time of the day and regain the signal again the next day, extreme cases like users home is blocking signal or phone switched off
+    sel_sql = 'WITH cte AS (SELECT id, starttripid, endtripid, rasterid, inrastertime, outtime, rasterduration, row_number() OVER(PARTITION BY inrastertime::date ORDER BY id DESC) AS rn' \
+              ' FROM   %s) SELECT * FROM   cte WHERE  rn = 1;' % stopTable
+    print sel_sql
+
+    cur = con.cursor()
+    cur.execute(sel_sql)
+    rows = cur.fetchall()
+    rasterids = []
+    total = 0
+    for row in rows:
+        rasterids.append(row[3])
+        total += 1
+    print len(rasterids)
+    cur.close()
+
+    sel_sql='WITH cte AS (SELECT id, starttripid, endtripid, rasterid, inrastertime, outtime, rasterduration, row_number() OVER(PARTITION BY inrastertime::date ORDER BY id DESC) AS rn' \
+            ' FROM   %s) SELECT * FROM   cte WHERE  rn = 1 and inrastertime::date-outtime::date=-1;'%stopTable
+    print sel_sql
+
+    cur = con.cursor()
+    cur.execute(sel_sql)
+    rows = cur.fetchall()
+    rasterids=[]
+    totalValid=0
+    for row in rows:
+        rasterids.append(row[3])
+        totalValid+=1
+    print len(rasterids)
+    cur.close()
+
+
+    #with all the valid overnight records
+    validProbability=totalValid/float(total)
+    from collections import Counter
+    homeCandidates=Counter(rasterids)
+    print homeCandidates
+
+    homeLocationWithConfidence = {}
+    for k, v in homeCandidates.most_common():
+        print k,v
+        print int(v)/float(len(rasterids))
+        homeLocationWithConfidence[k] = int(v)/float(len(rasterids))*validProbability
+    # homeLocationWithConfidence={}
+    # for k,v in homeCandidates.iteritems():
+    #     homeLocationWithConfidence[k]=int(v)/float(len(homeCandidates)))*validProbability
+
+    #homeLocationWithConfidence={rasterid:int(v)/float(len(rasterids)*validProbability for rasterid,v in homeCandidates.most_common()}
+    print homeLocationWithConfidence
+    from operator import itemgetter
+    from collections import OrderedDict
+    homeLocationWithConfidence_sorted=OrderedDict(sorted(homeLocationWithConfidence.items(), key=lambda t: t[1], reverse=True))
+    print homeLocationWithConfidence_sorted
+    homeLocaionCellId=homeLocationWithConfidence_sorted.keys()[0]
+    print homeLocaionCellId
+
+
+    #work location=weekday stay between 8:00 to 18:00 top dwelling time
+    #shortcomes: not good for delivery or texi drivers
+    sel_uniqueWeekDays='select distinct inrastertime::date as day from %s where extract(dow from (inrastertime::date)) in (1,2,3,4,5) order by day '%stopTable
+    print sel_uniqueWeekDays
+    cur = con.cursor()
+    cur.execute(sel_uniqueWeekDays)
+    rows = cur.fetchall()
+    uniqueDates = []
+    total = 0
+    for row in rows:
+        uniqueDates.append(row[0])
+        total += 1
+    print len(uniqueDates)
+    cur.close()
+
+    workLocationCandidates=[]
+    for day in sorted(uniqueDates):
+        #print day
+        ###########################after test update interval
+        sel_sql = 'select * from (select sum(rasterduration) dwellingTime, rasterid, min(inrastertime) as t, max(outtime) as out from (select * from (select *,extract(DOW from inrastertime) as weekday  from %s) as foo where weekday in (1,2,3,4,5)) as foo2 ' \
+                  'where inrastertime::date =\'%s\'::date and rasterid<>%s group by rasterid order by dwellingTime desc) as foo3 where t ::time>=\'08:00:00\'::time and out ::time<=\'19:00:00\'::time' % (stopTable,day,homeLocaionCellId)
+        #print sel_sql
+
+        from sqlalchemy import create_engine
+
+        engine = create_engine('postgresql://postgres:123456@localhost:5432/yangnewsample_Grid')
+        sql_query = sel_sql
+        #print sql_query
+        df = pd.read_sql_query(sql_query, con=engine)
+        #print df
+      
+        ##distance to mean not in use
+        # dwellingTimeArray=df['dwellingtime'].values
+        # print dwellingTimeArray
+        #
+        # mean = np.mean(dwellingTimeArray, axis=0)
+        # sd = np.std(dwellingTimeArray, axis=0)
+        # print mean + sd
+        #
+        # final_list = [x for x in dwellingTimeArray if (x>= mean + sd)]
+        # print final_list
+
+        workLocationCandidates.append(df.iloc[0]['rasterid'])
+    #print workLocationCandidates
+    #print len(workLocationCandidates),len(uniqueDates)
+
+    workCandidates=Counter(workLocationCandidates)
+    print workCandidates
+
+    validProbability=len(workLocationCandidates)/float(len(uniqueDates))
+    workLocationWithConfidence = {}
+    for k, v in workCandidates.most_common():
+        # print k,v
+        # print int(v)/float(len(workLocationCandidates))
+        workLocationWithConfidence[k] = int(v)/float(len(workLocationCandidates))*validProbability
+
+    #print workLocationWithConfidence
+    from operator import itemgetter
+    from collections import OrderedDict
+
+    workLocationWithConfidence_sorted=OrderedDict(sorted(workLocationWithConfidence.items(), key=lambda t: t[1], reverse=True))
+    #print workLocationWithConfidence_sorted
+    workLocaionCellId=workLocationWithConfidence_sorted.keys()[0]
+    print workLocaionCellId
+
+
+    ##update Stop Table
+    #add placeindicator
+    cur = con.cursor()
+    dropplace_sql='ALTER TABLE %s drop column if exists place'%stopTable
+    cur.execute(dropplace_sql)
+    addplace_sql='ALTER TABLE %s ADD COLUMN place character varying(50)'%stopTable
+    cur.execute(addplace_sql)
+    cur.close()
+
+    #update home work stop if the identified cells occupy majority of the overall stop time
+    # at the moment if home or work cell in teh stop, the stop is marked as home/work
+    sel_uniqueStops ='select distinct endtripid from %s'%stopTable
+    cur=con.cursor()
+    cur.execute(sel_uniqueStops)
+    rows = cur.fetchall()
+    trips = []
+    for row in rows:
+        if row[0] is not None:
+            trips.append(row[0])
+    print len(trips)
+    cur.close()
+
+    for tripid in trips:
+        sel_tripStartStops='select rasterid, sum(rasterduration) from %s where starttripid=%s group by rasterid'%(stopTable,tripid)
+        cur = con.cursor()
+        cur.execute(sel_tripStartStops)
+        rows = cur.fetchall()
+        totalrsterDurations={}
+        for row in rows:
+            totalrsterDurations[row[0]] = row[1]
+        print totalrsterDurations
+        cur.close()
+        totalrsterDurations_normalized={k:v/float(sum(totalrsterDurations.values())) for k,v in totalrsterDurations.iteritems()}
+        print totalrsterDurations_normalized
+
+        #at the moment if home/work cell in the stop,  mark stop. no duration check
+        if homeLocaionCellId in totalrsterDurations_normalized.keys():
+            update_tripStops='update %s set place =\'home\' where starttripid=%s'%(stopTable, tripid)
+            print update_tripStops
+            cur = con.cursor()
+            cur.execute(update_tripStops)
+            cur.close()
+        if workLocaionCellId in totalrsterDurations_normalized.keys():
+            update_tripStops='update %s set place =\'work\' where starttripid=%s'%(stopTable, tripid)
+            cur = con.cursor()
+            cur.execute(update_tripStops)
+            cur.close()
+
+        #for those trips that endstops are not start of next trip
+        sel_tripEndStops='select rasterid, sum(rasterduration) from %s where endtripid=%s and starttripid is null group by rasterid'%(stopTable,tripid)
+        print sel_tripEndStops
+        cur = con.cursor()
+        cur.execute(sel_tripEndStops)
+        rows = cur.fetchall()
+        if len(rows)>0:
+            totalrsterDurations={}
+            for row in rows:
+                totalrsterDurations[row[0]] = row[1]
+            print totalrsterDurations
+            cur.close()
+            totalrsterDurations_normalized={k:v/float(sum(totalrsterDurations.values())) for k,v in totalrsterDurations.iteritems()}
+            print totalrsterDurations_normalized
+
+            #at the moment if home/work cell in the stop,  mark stop. no duration check
+            if homeLocaionCellId in totalrsterDurations_normalized.keys():
+                update_tripStops='update %s set place =\'home\' where endtripid=%s and starttripid is null'%(stopTable, tripid)
+                cur = con.cursor()
+                cur.execute(update_tripStops)
+                cur.close()
+            if workLocaionCellId in totalrsterDurations_normalized.keys():
+                update_tripStops='update %s set place =\'work\' where endtripid=%s and starttripid is null'%(stopTable, tripid)
+                cur = con.cursor()
+                cur.execute(update_tripStops)
+                cur.close()
+
+        ##select all the cellids within home/work stops annotate trips that do not stop at exact home/work cell but around it
+        ##smoothing not necessary for this user may check for other users
+        # sel_homeRelatedCells='select distinct rasterid from %s'%stopTable
+        # cur = con.cursor()
+        # cur.execute(sel_homeRelatedCells)
+        # rows = cur.fetchall()
+        # homeCells=[]
+        # for row in rows:
+        #     homeCells.append(row[0])
+        # print len(homeCells)
+        # cur.close()
+
+    ##output stops other than home/work
+    ##only unique cellids for land use information
+    sel_stopsToFurtherAnnotate='select distinct rasterid from %s where place is null '%stopTable
+    print sel_stopsToFurtherAnnotate
+    cur = con.cursor()
+    cur.execute(sel_stopsToFurtherAnnotate)
+    rows = cur.fetchall()
+    furtherRasters=[]
+    for row in rows:
+        if len(rows)>0:
+            if row is not None:
+                furtherRasters.append(row[0])
+    print len(furtherRasters)
+
+    ##check home/work
+    if homeLocaionCellId in furtherRasters or workLocaionCellId in furtherRasters:
+        print 'Check!!!!!'
+    else:
+        print 'all ok. new dump'
+        outName='E:\\CatchTest\\4thQuarter\\YangNew\\stopSegmentation\\outRaserCellIdsForIntersectin\\testForFurtherRasterIds.txt'
+        with open(outName, 'w') as outfile:
+            json.dump(furtherRasters, outfile, sort_keys=True, indent=4,
+                      ensure_ascii=False)
+
+        with open(outName) as outfile:
+            test=json.load(outfile)
+            print test
+
+
+except psycopg2.DatabaseError, e:
+    print 'Error %s' % e
+    sys.exit(1)
+
+
+finally:
+
+    if con:
+        con.close()
+
+
+
+
+
+
+
