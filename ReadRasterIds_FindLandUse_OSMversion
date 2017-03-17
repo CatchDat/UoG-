@@ -1,0 +1,134 @@
+
+import psycopg2
+import sys
+import pickle
+
+
+try:
+
+    conn_string = "XXX'"
+
+    con = psycopg2.connect(conn_string)
+    con.autocommit = True
+
+    cur = con.cursor()
+    cur.execute('SELECT version()')
+    ver = cur.fetchone()
+    print ver
+    cur.close()
+
+    #intersect grid cells polygons with a set of features for annotation
+    #for points, it summons all the points' name and aggreate occruance of points under different 'types'
+    #for polygons, it get the name and type from the polygon such as land uses
+
+    featuresToIntersect = ['\"natural\"','landuse', 'buildings','places', 'points']
+
+    cellTable='extractedcells_polygon'
+    cellAnno_Overall={}
+    for feat in featuresToIntersect:
+        print feat
+        sel_geomtype='SELECT ST_GeometryType(geom) FROM %s where gid=1'%(feat)
+        print sel_geomtype
+        cur = con.cursor()
+        cur.execute(sel_geomtype)
+        rows = cur.fetchall()
+        for row in rows:
+            typeOfFeat= row[0]
+        cur.close()
+
+        sel_uniqueCell='select distinct gridcode from %s'%cellTable
+        cur = con.cursor()
+        cur.execute(sel_uniqueCell)
+        uniqueCells=[]
+        rows = cur.fetchall()
+        for row in rows:
+            uniqueCells.append(row[0])
+        cur.close()
+
+        if typeOfFeat=='ST_Point':
+            cellPoints={}
+            for cell in uniqueCells:
+                print cell
+                intersect_sel='select name,type from (select * from extractedcells_polygon where gridcode=\'%s\') as polygon, %s where ST_Intersects(polygon.geom,%s.geom)'%(cell,feat,feat)
+                print intersect_sel
+                cur = con.cursor()
+                cur.execute(intersect_sel)
+                pointNames = []
+                pointTypes=[]
+                rows = cur.fetchall()
+                if len(rows)>0:
+                    totalPoints=0
+                    for row in rows:
+                        pointNames.append(row[0])
+                        pointTypes.append(row[1])
+                        totalPoints+=1
+                    cur.close()
+
+                    from collections import Counter
+                    type_occr=Counter(pointTypes)
+                    print type_occr.most_common()
+                    type_freq={}
+                    for k,v in type_occr.most_common():
+                        type_freq[k]=v/float(totalPoints)
+
+                    cellPoints[cell]=[pointNames,type_freq,totalPoints]
+                else:
+                    cellPoints[cell]=[[],{},0]
+            cellAnno_Overall[feat]=cellPoints
+
+        else:
+            cellPolygons={}
+            for cell in uniqueCells:
+                print cell
+                intersect_sel='select name,type from (select * from extractedcells_polygon where gridcode=\'%s\') as polygon, %s where ST_Intersects(polygon.geom,%s.geom)'%(cell,feat,feat)
+                print intersect_sel
+                cur = con.cursor()
+                cur.execute(intersect_sel)
+                polygontNames = []
+                polygonTypes=[]
+                rows = cur.fetchall()
+                if len(rows)>0:
+                    totalpolygon=0
+                    for row in rows:
+                        polygontNames.append(row[0])
+                        polygonTypes.append(row[1])
+                        totalpolygon+=1
+                    cur.close()
+
+                    from collections import Counter
+                    type_occr=Counter(polygonTypes)
+                    print type_occr.most_common()
+                    type_freq={}
+                    for k,v in type_occr.most_common():
+                        type_freq[k]=v/float(totalpolygon)
+
+                    cellPolygons[cell]=[polygontNames,type_freq,totalpolygon]
+                else:
+                    cellPolygons[cell]=[[],{},0]
+            cellAnno_Overall[feat]=cellPolygons
+
+    import json
+    outputName='E:\\XXX\outRaserCellIdsForIntersectin\\output\\outforV_pickle.txt'
+    # with open(outputName, 'w') as outfile:
+    #     json.dump(cellAnno_Overall, outfile, sort_keys=True, indent=4,
+    #               ensure_ascii=False)
+    with open(outputName, 'w') as outfile:
+            pickle.dump(cellAnno_Overall, outfile)
+
+
+except psycopg2.DatabaseError, e:
+    print 'Error %s' % e
+    sys.exit(1)
+
+
+finally:
+
+    if con:
+        con.close()
+
+
+
+
+
+
+
